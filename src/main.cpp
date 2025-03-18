@@ -1,4 +1,8 @@
 #include <Arduino.h>
+#include <BLEDevice.h>
+#include <BLEServer.h>
+#include <BLEUtils.h>
+#include <BLE2902.h>
 #include <SPI.h>
 #include <Adafruit_GFX.h>
 #include <Adafruit_ST7789.h>
@@ -22,16 +26,33 @@
 #define SD_SCLK 3
 #define SD_CS 46
 
+#define SERVICE_UUID "4fafc201-1fb5-459e-8fcc-c5c9c331914b"
+#define CHARACTERISTIC_UUID "beb5483e-36e1-4688-b7f5-ea07361b26a8"
+
+BLEServer* pServer = nullptr;
+BLECharacteristic* pCharacteristic = nullptr;
+bool deviceConnected = false;
+
 SPIClass SPI_TFT(HSPI);
 Adafruit_ST7789 tft = Adafruit_ST7789(&SPI_TFT, TFT_CS, TFT_DC, TFT_RST);
 SPIClass SPI_SD(HSPI);
 
 unsigned long lastLogTime = 0;
 
+class MyServerCallbacks: public BLEServerCallbacks {
+    void onConnect(BLEServer* pServer) { deviceConnected = true; }
+    void onDisconnect(BLEServer* pServer) {
+        deviceConnected = false;
+        BLEAdvertising *pAdvertising = BLEDevice::getAdvertising();
+        pAdvertising->setMinPreferred(0x20);
+        BLEDevice::startAdvertising();
+    }
+};
+
 void setupTime() {
     struct tm timeinfo;
-    timeinfo.tm_year = 2025 - 1900;
-    timeinfo.tm_mon = 2;
+    timeinfo.tm_year = 2025 - 1900;  // 年份 - 1900
+    timeinfo.tm_mon = 2;             // 3 月（从 0 开始）
     timeinfo.tm_mday = 17;
     timeinfo.tm_hour = 14;
     timeinfo.tm_min = 30;
@@ -69,6 +90,17 @@ void setup() {
     analogReadResolution(12);
     analogSetAttenuation(ADC_11db);
 
+    BLEDevice::init("ESP32S3_Battery");
+    pServer = BLEDevice::createServer();
+    pServer->setCallbacks(new MyServerCallbacks());
+    BLEService *pService = pServer->createService(SERVICE_UUID);
+    pCharacteristic = pService->createCharacteristic(CHARACTERISTIC_UUID, BLECharacteristic::PROPERTY_READ | BLECharacteristic::PROPERTY_NOTIFY);
+    pCharacteristic->addDescriptor(new BLE2902());
+    pService->start();
+    BLEAdvertising *pAdvertising = BLEDevice::getAdvertising();
+    pAdvertising->addServiceUUID(SERVICE_UUID);
+    BLEDevice::startAdvertising();
+
     Serial.println("Setting system time...");
     setupTime();
     Serial.println("Time set successfully");
@@ -99,6 +131,10 @@ void logDataToSD(float voltage) {
     Serial.println("Error: Could not write to SD after retries!");
 }
 
+String formatVoltageToJSON(float voltage) {
+    return "{\"voltage\":" + String(voltage, 2) + "}";
+}
+
 void loop() {
     if (millis() - lastLogTime >= 2000) {
         lastLogTime = millis();
@@ -109,6 +145,11 @@ void loop() {
         tft.setTextColor(ST77XX_WHITE);
         tft.setTextSize(2);
         tft.printf("Voltage: %.2f V", batteryVoltage);
+
+        if (deviceConnected) {
+            pCharacteristic->setValue(formatVoltageToJSON(batteryVoltage).c_str());
+            pCharacteristic->notify();
+        }
 
         logDataToSD(batteryVoltage);
     }
